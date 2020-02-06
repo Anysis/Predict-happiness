@@ -1,0 +1,411 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import KFold
+import xgboost as xgb
+import lightgbm as lgb
+from catboost import Pool, CatBoostRegressor
+%matplotlib inline
+#显示所有列
+pd.set_option('display.max_columns', None)
+#显示所有行
+pd.set_option('display.max_rows', None)
+# 中文支持
+plt.rcParams['font.sans-serif']=['SimHei'] 
+plt.rcParams['axes.unicode_minus']=False 
+
+一、理解数据
+#导入数据
+train=pd.read_csv("happiness_train_complete.csv",encoding='ISO-8859-1')
+test=pd.read_csv("happiness_test_complete.csv",encoding='ISO-8859-1')
+test_sub=pd.read_csv("happiness_submit.csv",encoding='ISO-8859-1')
+print('训练集格式：',train.shape)
+print('训练集格式：',test.shape)
+
+#数据基础信息
+train.describe()
+
+col = train.columns.tolist()
+print('数据特征及标签：',col)
+
+train.head(5)
+
+#训练集数据缺失程度
+train.info(verbose=True,null_counts=True)
+
+#测试集数据缺失程度
+test.info(verbose=True,null_counts=True)
+
+二、数据清洗
+#处理标签
+y_train_=train["happiness"]
+print('标签数据分布:\n',y_train_.value_counts())
+#将-8转换为3
+train['happiness'] = train['happiness'].map(lambda x: 3 if x==-8 else x)
+#将标签修改为0开始
+train['happiness'] = train['happiness'].map(lambda x:x-1)
+y_train_ = train['happiness']
+print('处理后的标签数据分布:\n',y_train_.value_counts())
+
+#train和test连在一起
+data = pd.concat([train,test],axis=0,ignore_index=True)
+print('数据大小：',data.shape)
+#处理数据类型
+#处理时间特征
+data['survey_time'] = pd.to_datetime(data['survey_time'],format='%Y-%m-%d %H:%M:%S')
+data["weekday"]=data["survey_time"].dt.weekday
+data["year"]=data["survey_time"].dt.year
+data["quarter"]=data["survey_time"].dt.quarter
+data["hour"]=data["survey_time"].dt.hour
+data["month"]=data["survey_time"].dt.month
+#填充数据
+data["edu_status"]=data["edu_status"].fillna(5)
+data["edu_yr"]=data["edu_yr"].fillna(-2)
+data["property_other"]=data["property_other"].map(lambda x:0 if pd.isnull(x)  else 1)
+data["hukou_loc"]=data["hukou_loc"].fillna(1)
+data["social_neighbor"]=data["social_neighbor"].fillna(8)
+data["social_friend"]=data["social_friend"].fillna(8)
+data["work_status"]=data["work_status"].fillna(0)
+data["work_yr"]=data["work_yr"].fillna(0)
+data["work_type"]=data["work_type"].fillna(0)
+data["work_manage"]=data["work_manage"].fillna(0)
+data["family_income"]=data["family_income"].fillna(-2)
+data["invest_other"]=data["invest_other"].map(lambda x:0 if pd.isnull(x)  else 1)
+data["minor_child"]=data["minor_child"].fillna(0)
+data["marital_1st"]=data["marital_1st"].fillna(0)
+data["s_birth"]=data["s_birth"].fillna(0)
+data["marital_now"]=data["marital_now"].fillna(0)
+data["s_edu"]=data["s_edu"].fillna(0)
+data["s_political"]=data["s_political"].fillna(0)
+data["s_hukou"]=data["s_hukou"].fillna(0)
+data["s_income"]=data["s_income"].fillna(0)
+data["s_work_exper"]=data["s_work_exper"].fillna(0)
+data["s_work_status"]=data["s_work_status"].fillna(0)
+data["s_work_type"]=data["s_work_type"].fillna(0)
+#去掉缺失值很多的
+data=data.drop(['edu_other'], axis=1)
+
+三、特征工程
+#把一天的时间分段
+def hour_cut(x):
+    if 0<=x<6:
+        return 0
+    elif  6<=x<8:
+        return 1
+    elif  8<=x<12:
+        return 2
+    elif  12<=x<14:
+        return 3
+    elif  14<=x<18:
+        return 4
+    elif  18<=x<21:
+        return 5
+    elif  21<=x<24:
+        return 6
+data["hour_cut"]=data["hour"].map(hour_cut)
+
+#是否入党
+data["join_party"]=data["join_party"].map(lambda x:0 if pd.isnull(x)  else 1)
+#做问卷时候的年龄
+data["survey_age"]=data["year"]-data["birth"]
+
+#出生的年代
+def birth_split(x):
+    if 1920<=x<=1930:
+        return 0
+    elif  1930<x<=1940:
+        return 1
+    elif  1940<x<=1950:
+        return 2
+    elif  1950<x<=1960:
+        return 3
+    elif  1960<x<=1970:
+        return 4
+    elif  1970<x<=1980:
+        return 5
+    elif  1980<x<=1990:
+        return 6
+    elif  1990<x<=2000:
+        return 7    
+data["birth_s"]=data["birth"].map(birth_split)
+
+#收入分组
+def income_cut(x):
+    if x<=0:
+        return 0
+    elif  0<x<=1200:
+        return 1
+    elif  1200<x<=10000:
+        return 2
+    elif  10000<x<=24000:
+        return 3
+    elif  24000<x<=40000:
+        return 4
+    elif  40000<x:
+        return 5
+data["income_cut"]=data["income"].map(income_cut)
+
+四、数据可视化
+#提取可视化数据
+data_show = data.copy().iloc[:train.shape[0]]
+4.1 标签分布
+#查看标签分布情况
+dict_y = {0:'非常不幸福',1:'比较不幸福',2:'一般',3:'比较幸福',4:'非常幸福'}
+y_train_dict = y_train_.map(dict_y)
+
+fig,ax = plt.subplots(1,2,figsize=(12,4))
+y_train_dict.value_counts().plot.pie(autopct='%1.1f%%',shadow=True,ax=ax[0])
+ax[0].set_title('happiness')
+ax[0].set_ylabel('')
+y_train_dict.value_counts().plot.bar()
+ax[1].set_title('happiness')
+#{0:非常不幸福,1:比较不幸福,2:一般,3:比较幸福,4:很幸福}
+居民普遍为中等幸福感，低幸福感的人数较少
+4.2 性别和幸福感的关系
+# 探究性别和幸福感的关系
+def transf_gender(x):
+    if x == 1:
+        return '男'
+    elif x == 2:
+        return '女'
+data_show['gender'] = data_show['gender'].map(transf_gender)
+data_show['happiness_type'] = data_show['happiness'].map(dict_y)
+
+fig,ax = plt.subplots(1,2,figsize=(12,4))
+sns.countplot('gender',hue='happiness_type',data=data_show,ax=ax[0])
+ax[0].set_title('Sex:happiness')
+ax[0].set_ylabel('happiness')
+sns.countplot('happiness_type',hue='gender',data=data_show,ax=ax[1])
+ax[1].set_title('Happiness:sex')
+ax[1].set_ylabel('gender')
+男女幸福指数并没有较大的差异
+4.3 地区和幸福感的关系
+dict_type={1:'城市',2:'农村'}
+data_show['survey_type'] = data_show['survey_type'].map(dict_type)
+fig,ax = plt.subplots(1,2,figsize=(16,6))
+sns.countplot('happiness_type',hue='survey_type',data=data_show,ax=ax[0])
+sns.countplot('survey_type',hue='happiness_type',data=data_show,ax=ax[1])
+dict_pro = {1:'上海市',2:'云南省',3:'内蒙古自治区',4:'北京市',5:'吉林省',6:'四川省',7:'天津市',8 : '宁夏回族自治区',
+           9: '安徽省',10:'山东省',11 :'山西省',12 :'广东省',13:'广西壮族自治区',14: '新疆维吾尔自治区',15:'江苏省',16:'江西省',
+           17:'河北省',18 :'河南省', 19:'浙江省',20 :'海南省',21:'湖北省', 22 :'湖南省',23:'甘肃省',24: '福建省', 25:'西藏自治区',
+           26:'贵州省', 27:'辽宁省', 28:'重庆市', 29:'陕西省', 30:'青海省',31:'黑龙江省'}
+pro = data_show['province'].unique().tolist()
+print('数据来源于%d个省'%len(pro))
+i=1
+for k in sorted(pro):
+    plt.figure(figsize=(12,6))
+    data_show[data_show['province']==k].happiness.value_counts().plot.bar()
+    plt.title(dict_pro[k])
+    plt.xlabel('幸福指数')
+    plt.ylabel('数量')
+    i+=1
+plt.show()
+城市居民相比于农村居民的幸福感更高，但都存在一部分幸福感较低的居民
+4.4 年龄和幸福感的关系
+# 探究年龄和幸福感的关系
+h_age = data_show.groupby('survey_age',as_index=False).happiness.mean()
+plt.figure(figsize=(12,6))
+plt.plot(h_age['survey_age'],h_age['happiness'])
+plt.title('happiness-survey_age')
+plt.xlabel('survey_age')
+plt.ylabel('happiness')
+
+# 便于观察，将年龄分组
+def split(x):
+    if x<18:
+        return '少年'
+    elif 18<=x<32:
+        return '成年'
+    elif 32<=x<64:
+        return '中年'
+    elif 64<x:
+        return '老年'
+    
+data_show['age'] = data_show['survey_age'].map(split)
+sns.countplot('age',hue='happiness_type',data = data_show)
+
+figure1,ax1 = plt.subplots(1,3,figsize=(18,4))
+ax1[0].set_title('成年')
+data_show['happiness_type'][data_show['age']=='成年'].value_counts().plot.pie(autopct='%1.1f%%',ax=ax1[0],shadow=True)
+ax1[1].set_title('中年')
+data_show['happiness_type'][data_show['age']=='中年'].value_counts().plot.pie(autopct='%1.1f%%',ax=ax1[1],shadow=True)
+ax1[2].set_title('老年')
+data_show['happiness_type'][data_show['age']=='老年'].value_counts().plot.pie(autopct='%1.1f%%',ax=ax1[2],shadow=True)
+
+4.5 特征相关性
+data_show.corr().happiness.sort_values(ascending=False)
+
+plt.figure(figsize=(18,18))
+sns.heatmap(data_show.corr())
+我们可以看出，有一部分的特征与标签的相关性较低，这一部分特征可以尝试剔除，鉴于本项目数据特征较少，我们全部保留。
+
+五、选择模型
+#删除无用特征
+data=data.drop(['id','happiness','survey_time'], axis=1)
+#提取训练集和测试集
+X_train_ = data[:train.shape[0]]
+X_test_  = data[train.shape[0]:]
+target_column = 'happiness'
+feature_columns=list(X_test_.columns) 
+print('训练集大小：',X_train_.shape)
+print('测试集大小：',X_test_.shape)
+print('特征列表：',feature_columns)
+X_train = np.array(X_train_)
+y_train = np.array(y_train_)
+X_test  = np.array(X_test_)
+
+5.1 XGB
+5.1.1 训练模型
+#自定义评价函数
+def myFeval(preds, xgbtrain):
+    label = xgbtrain.get_label()
+    score = mean_squared_error(label,preds)
+    return 'myFeval',score
+##### xgb
+xgb_params = {"booster":'gbtree','eta': 0.005, 'max_depth': 4, 'subsample': 0.7,'alpha':1,'lambda':1,
+              'colsample_bytree': 0.8, 'objective': 'reg:linear', 'eval_metric': 'rmse', 'silent': True, 'nthread': 8}
+folds = KFold(n_splits=5, shuffle=True, random_state=2020)
+oof_xgb = np.zeros(len(train))
+predictions_xgb = np.zeros(len(test))
+
+for fold_, (trn_idx, val_idx) in enumerate(folds.split(X_train, y_train)):
+    print("fold n°{}".format(fold_+1))
+    trn_data = xgb.DMatrix(X_train[trn_idx], y_train[trn_idx])
+    val_data = xgb.DMatrix(X_train[val_idx], y_train[val_idx])
+    
+    watchlist = [(trn_data, 'train'), (val_data, 'valid_data')]
+    clf_xgb = xgb.train(dtrain=trn_data, num_boost_round=20000, evals=watchlist, early_stopping_rounds=200, verbose_eval=100, params=xgb_params,feval = myFeval)
+    oof_xgb[val_idx] = clf_xgb.predict(xgb.DMatrix(X_train[val_idx]), ntree_limit=clf_xgb.best_ntree_limit)
+    predictions_xgb += clf_xgb.predict(xgb.DMatrix(X_test), ntree_limit=clf_xgb.best_ntree_limit) / folds.n_splits    
+print("CV score: {:<8.8f}".format(mean_squared_error(oof_xgb, y_train_)))
+#保存结果
+result=list(predictions_xgb)
+result=list(map(lambda x: x + 1, result))
+test_sub['happiness']=result
+test_sub.to_csv('submit_xgb.csv', index=False)
+5.1.2 XGB特征重要性
+from xgboost import plot_importance
+fig,ax = plt.subplots(figsize=(15,15))
+plot_importance(clf_xgb,
+                height=0.5,
+                ax=ax,
+                max_num_features=50)
+plt.show()
+
+5.2 LGB
+5.2.1 训练模型
+##### lgb
+param = {'boosting_type': 'gbdt',
+         'num_leaves': 20,
+         'min_data_in_leaf': 30, 
+         'objective':'regression',
+         'max_depth':6,
+         'learning_rate': 0.01,
+         "min_child_samples": 40,
+         "feature_fraction": 0.7,
+         "bagging_freq": 1,
+         "bagging_fraction": 0.8,
+         "bagging_seed": 11,
+         "metric": 'mse',
+         "lambda_l1": 0.1,
+         "verbosity": -1}
+folds = KFold(n_splits=5, shuffle=True, random_state=2020)
+oof_lgb = np.zeros(len(X_train_))
+predictions_lgb = np.zeros(len(X_test_))
+for fold_, (trn_idx, val_idx) in enumerate(folds.split(X_train, y_train)):
+    print("fold n°{}".format(fold_+1))
+    trn_data = lgb.Dataset(X_train[trn_idx], y_train[trn_idx])  
+    val_data = lgb.Dataset(X_train[val_idx], y_train[val_idx])
+    num_round = 10000
+    clf_lgb = lgb.train(param, trn_data, num_round, valid_sets = [trn_data, val_data], verbose_eval=200, early_stopping_rounds = 100)
+    oof_lgb[val_idx] = clf_lgb.predict(X_train[val_idx], num_iteration=clf_lgb.best_iteration)   
+    predictions_lgb += clf_lgb.predict(X_test, num_iteration=clf_lgb.best_iteration) / folds.n_splits
+print("CV score: {:<8.8f}".format(mean_squared_error(oof_lgb, y_train_)))
+#保存结果
+result=list(predictions_lgb)
+result=list(map(lambda x: x + 1, result))
+test_sub['happiness']=result
+test_sub.to_csv('submit_lgb.csv', index=False)
+
+5.2.2 LGB特征重要性
+df = pd.DataFrame(X_test_.columns.tolist(), columns=['feature'])
+df['importance']=list(clf_lgb.feature_importance())
+df = df.sort_values(by='importance',ascending=False)
+plt.figure(figsize=(14,28))
+sns.barplot(x="importance", y="feature", data=df.head(50))
+plt.title('LGB features importance (averaged/folds)')
+plt.tight_layout()
+
+5.3 CAT
+5.3.1 训练模型
+kfolder = KFold(n_splits=5, shuffle=True, random_state=2020)
+oof_cb = np.zeros(len(X_train_))
+predictions_cb = np.zeros(len(X_test_))
+kfold = kfolder.split(X_train_, y_train_)
+fold_=0
+for train_index, vali_index in kfold:
+    print("fold n°{}".format(fold_))
+    fold_=fold_+1
+    k_x_train = X_train[train_index]
+    k_y_train = y_train[train_index]
+    k_x_vali = X_train[vali_index]
+    k_y_vali = y_train[vali_index]
+    cb_params = {
+         'n_estimators': 100000,
+         'loss_function': 'RMSE',
+         'eval_metric':'RMSE',
+         'learning_rate': 0.05,
+         'depth': 5,
+         'use_best_model': True,
+         'subsample': 0.6,
+         'bootstrap_type': 'Bernoulli',
+         'reg_lambda': 3
+    }
+    model_cb = CatBoostRegressor(**cb_params)
+    #train the model
+    model_cb.fit(k_x_train, k_y_train,eval_set=[(k_x_vali, k_y_vali)],verbose=100,early_stopping_rounds=50)
+    oof_cb[vali_index] = model_cb.predict(k_x_vali, ntree_end=model_cb.best_iteration_)
+    predictions_cb += model_cb.predict(X_test_, ntree_end=model_cb.best_iteration_) / kfolder.n_splits
+print("CV score: {:<8.8f}".format(mean_squared_error(oof_cb, y_train_)))
+#保存模型
+result=list(predictions_cb)
+result=list(map(lambda x: x + 1, result))
+test_sub['happiness']=result
+test_sub.to_csv('submit_cb.csv', index=False)
+
+5.3.2 CAT特征重要性
+df = pd.DataFrame(X_test_.columns.tolist(), columns=['feature'])
+df['importance']=list(model_cb.get_feature_importance())
+df = df.sort_values(by='importance',ascending=False)
+plt.figure(figsize=(14,28))
+sns.barplot(x="importance", y="feature", data=df.head(50))
+plt.title('CAT features importance (averaged/folds)')
+plt.tight_layout()
+
+六、模型融合，预测结果
+from sklearn import linear_model
+from sklearn.model_selection import RepeatedKFold
+# 将lgb和xgb和ctb的结果进行stacking
+train_stack = np.vstack([oof_lgb,oof_xgb,oof_cb]).transpose()
+test_stack = np.vstack([predictions_lgb, predictions_xgb,predictions_cb]).transpose()
+
+folds_stack = RepeatedKFold(n_splits=5, n_repeats=2, random_state=2018)
+oof_stack = np.zeros(train_stack.shape[0])
+predictions = np.zeros(test_stack.shape[0])
+for fold_, (trn_idx, val_idx) in enumerate(folds_stack.split(train_stack,y_train)):
+    print("fold {}".format(fold_))
+    trn_data, trn_y = train_stack[trn_idx], y_train[trn_idx]
+    val_data, val_y = train_stack[val_idx], y_train[val_idx]
+    clf_3 = linear_model.BayesianRidge()
+    clf_3.fit(trn_data, trn_y)
+    oof_stack[val_idx] = clf_3.predict(val_data)
+    predictions += clf_3.predict(test_stack) / 10
+    
+print("CV score: {:<8.8f}".format(mean_squared_error(oof_stack, y_train)))
+#得出最终结果
+result=list(predictions)
+result=list(map(lambda x: x + 1, result))
+test_sub['happiness']=result
+test_sub.to_csv('submit_20200129.csv', index=False)
